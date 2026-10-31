@@ -1,0 +1,18 @@
+{
+  "name": "eseans-actions",
+  "private": true,
+  "type": "module",
+  "description": "eSeans zamanlanmis isleri (gunluk yedek)",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test",
+    "yedek": "node yedek/yedekle.mjs",
+    "yedek:kuru": "node yedek/yedekle.mjs --kuru --cikti cikti-kuru"
+  },
+  "dependencies": {
+    "exceljs": "4.4.0",
+    "pg": "8.16.3"
+  }
+}

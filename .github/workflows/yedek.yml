@@ -1,0 +1,99 @@
+# Gunluk yedek: eSeans veritabani -> ozel eseans/backups deposu.
+#
+# Bu depo HERKESE ACIK, Actions gunlukleri de acik. Bu yuzden:
+#   - ciktilar bu depoya ASLA yazilmaz, yalniz eseans/backups'a gider;
+#   - gunluge yalniz sayi yazilir (isletme adi/telefon/e-posta yok);
+#   - `set -x` kullanilmaz (komut satirindaki token gorunmesin).
+name: Gunluk yedek
+
+on:
+  schedule:
+    # 00:30 UTC = 03:30 Turkiye: gun kapanmis, trafik en dusuk.
+    - cron: '30 0 * * *'
+  workflow_dispatch:
+
+# Iki calisma ayni anda yedek deposuna force-push yapmasin; yarida kalan
+# calisma iptal edilmez, siradaki bekler.
+concurrency:
+  group: gunluk-yedek
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  # Yalniz asagidaki "zamanlamayi canli tut" adimi icin (bkz. orada).
+  actions: write
+
+jobs:
+  yedek:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      SAKLAMA_GUN: '90'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Bagimliliklar
+        run: npm ci --no-audit --no-fund
+
+      # Tum veri once runner'in gecici klasorune yazilir. Bu adim hata
+      # verirse (bir tablo bile okunamazsa) is durur ve hicbir sey
+      # gonderilmez: yarim yedek "tamam" gibi gorunmesin.
+      - name: Yedegi uret
+        env:
+          DATABASE_URL_POSTGRES: ${{ secrets.DATABASE_URL_POSTGRES }}
+        run: |
+          set -euo pipefail
+          BUGUN="$(TZ=Europe/Istanbul date +%F)"
+          echo "BUGUN=$BUGUN" >> "$GITHUB_ENV"
+          node yedek/yedekle.mjs --cikti "$RUNNER_TEMP/cikti" --bugun "$BUGUN" --gun "$SAKLAMA_GUN"
+          test -s "$RUNNER_TEMP/cikti/tam/$BUGUN.json.gz"
+          test -s "$RUNNER_TEMP/cikti/README.md"
+
+      # Yedek deposu sig (depth 1) klonlanir, bugunun dosyalari eklenir,
+      # saklama suresini asan gunler silinir ve TEK bir commit olarak
+      # force-push edilir. Neden gecmis tutulmuyor: her gun yeni ikili
+      # (xlsx/gz) dosyalar eklenir; normal commit'lerle depo sonsuza dek
+      # buyur. Gecmis gunler zaten dosya adiyla (tarih) agacta durur.
+      - name: Yedek deposuna gonder
+        env:
+          TOKEN: ${{ secrets.BACKUPS_REPO_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          D="$RUNNER_TEMP/backups"
+          git clone --quiet --depth 1 "https://x-access-token:${TOKEN}@github.com/eseans/backups.git" "$D"
+          cd "$D"
+          ONCE=$(find isletmeler -name '*.xlsx' 2>/dev/null | wc -l || true)
+          cp -R "$RUNNER_TEMP/cikti/." .
+          node "$GITHUB_WORKSPACE/yedek/temizle.mjs" --dizin . --bugun "$BUGUN" --gun "$SAKLAMA_GUN"
+          SONRA=$(find isletmeler -name '*.xlsx' 2>/dev/null | wc -l || true)
+          echo "Excel dosyasi: once $ONCE, sonra $SONRA"
+          # Emniyet: saklama gunde en fazla bir gunluk dosyayi dusurur.
+          # Yarisindan fazlasi bir anda gidiyorsa (yanlis tarih, hata) dur.
+          if [ "$ONCE" -gt 0 ] && [ "$SONRA" -lt $((ONCE / 2)) ]; then
+            echo "Beklenmedik toplu silme, gonderilmiyor."; exit 1
+          fi
+          test -s "tam/$BUGUN.json.gz"
+          printf '*.xlsx binary\n*.gz binary\n' > .gitattributes
+          git config user.name "eseans-yedek[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --quiet --orphan gunluk
+          git add -A
+          git commit --quiet -m "Gunluk yedek $BUGUN"
+          git push --quiet --force origin gunluk:main
+          echo "Gonderildi: $BUGUN"
+
+      # GitHub, herkese acik depoda 60 gun commit olmazsa zamanlanmis
+      # is akislarini kendiliginden kapatir. Bu depoya commit gelmedigi
+      # (ciktilar baska depoya gidiyor) icin yedek sessizce durabilirdi;
+      # is akisini her calismada yeniden "etkin" isaretlemek sayaci sifirlar.
+      - name: Zamanlamayi canli tut
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method PUT "repos/${{ github.repository }}/actions/workflows/yedek.yml/enable" --silent
